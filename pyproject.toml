@@ -1,0 +1,18 @@
+[project]
+name = "bayeagents"
+version = "0.1.0"
+description = "bayeagents"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "deepagents>=0.3.8",
+    "tavily-python>=0.7.19",
+    "python-dotenv>=1.0.0",
+    "langchain-openai>=0.3.0",
+    "langchainhub>=0.1.20",
+    "httpx>=0.28.1",
+    "httpx-sse>=0.4.3",
+    "pyjwt>=2.10.1",
+    "streamlit>=1.32.0",
+    "langgraph-cli[draw,inmem]>=0.4.12",
+]

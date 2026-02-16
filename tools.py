@@ -8,6 +8,7 @@ This module provides web search functionality using multiple providers:
 
 import os
 import re
+import json
 from typing import Literal, Any
 from tavily import TavilyClient
 from dotenv import load_dotenv
@@ -16,6 +17,37 @@ from datetime import datetime
 
 # Load environment variables
 load_dotenv()
+
+
+# ============================================================================
+# Time Utility - 获取当前系统时间
+# ============================================================================
+
+def get_current_time() -> dict[str, str]:
+    """获取当前系统时间。
+
+    Returns:
+        包含各种时间格式的字典：
+        - datetime: 完整日期时间 (YYYY-MM-DD HH:MM:SS)
+        - date: 日期 (YYYY-MM-DD)
+        - year: 年份
+        - month: 月份
+        - day: 日期
+        - weekday: 星期几
+        - timestamp: Unix时间戳
+    """
+    now = datetime.now()
+    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    return {
+        "datetime": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "date": now.strftime("%Y-%m-%d"),
+        "year": str(now.year),
+        "month": str(now.month),
+        "day": str(now.day),
+        "weekday": weekdays[now.weekday()],
+        "timestamp": str(int(now.timestamp())),
+        "message": f"当前系统时间是 {now.strftime('%Y年%m月%d日 %H:%M:%S')} {weekdays[now.weekday()]}"
+    }
 
 
 # ============================================================================
@@ -148,29 +180,106 @@ def set_search_task(
     min_sources: int = 3,
     time_sensitivity: str = "oneMonth"
 ) -> dict[str, Any]:
-    """Set the current search task and success criteria.
+    """Set the current search task using LLM to analyze and optimize search parameters.
+
+    This function uses LLM to:
+    1. Understand the user's search intent
+    2. Determine optimal time sensitivity (freshness)
+    3. Identify required information types
+    4. Generate search keywords
+    5. Define success criteria
 
     Args:
-        task: Description of what needs to be found
-        required_info_types: Types of information needed (e.g., ["news", "data", "analysis"])
-        min_sources: Minimum number of unique sources required
-        time_sensitivity: How fresh the information needs to be
+        task: User's search query or task description
+        required_info_types: Optional override for info types (LLM will infer if not provided)
+        min_sources: Minimum number of unique sources required (default 3)
+        time_sensitivity: Optional override for time sensitivity (LLM will infer if not provided)
 
     Returns:
-        Task configuration status
+        Dict containing:
+        - status: "task_set"
+        - task: Original task
+        - analyzed_task: LLM-analyzed task structure
+        - criteria: Search criteria
+        - search_suggestions: Suggested search keywords and approach
+        - message: Status message
     """
+    from langchain_openai import ChatOpenAI
+
+    # Get current time for context
+    current_time = get_current_time()
+
+    # Use LLM to analyze the task
+    llm = ChatOpenAI(
+        temperature=0.1,
+        model="glm-4-flash",
+        openai_api_key=os.environ.get("ZHIPUAI_API_KEY"),
+        openai_api_base="https://open.bigmodel.cn/api/paas/v4/"
+    )
+
+    analysis_prompt = f"""你是一个搜索任务分析专家。请分析以下搜索任务，并返回结构化的分析结果。
+
+当前时间: {current_time['datetime']} ({current_time['weekday']})
+
+搜索任务: {task}
+
+请分析并返回以下信息（JSON格式）：
+
+1. task_type: 任务类型（"news"新闻 / "research"研究 / "data"数据 / "analysis"分析 / "general"通用）
+2. time_sensitivity: 时效性要求
+   - "oneDay": 股票行情、突发新闻、实时数据
+   - "oneWeek": 近期新闻、技术动态、产品发布
+   - "oneMonth": 行业分析、研究报告、一般研究（默认）
+   - "oneYear": 长期趋势、历史对比
+   - "noLimit": 历史资料、不要求时效
+3. required_info_types: 需要的信息类型列表（如 ["新闻", "数据", "分析报告", "官方公告"]）
+4. search_keywords: 建议的搜索关键词列表（3-5个）
+5. success_criteria: 搜索成功的标准（如 "找到至少3个来源验证的核心信息"）
+6. entity: 搜索的主体对象（如公司名、产品名、人物名等）
+7. topic: 搜索主题分类
+
+请直接返回JSON：
+{{"task_type": "...", "time_sensitivity": "...", "required_info_types": [...], "search_keywords": [...], "success_criteria": "...", "entity": "...", "topic": "..."}}"""
+
+    llm_response = llm.invoke(analysis_prompt)
+    llm_content = llm_response.content.strip()
+
+    # Parse JSON response
+    if llm_content.startswith("```"):
+        llm_content = llm_content.split("\n", 1)[1]
+        llm_content = llm_content.rsplit("```", 1)[0]
+
+    analyzed = json.loads(llm_content)
+
+    # Use LLM-analyzed values unless explicitly provided
+    final_time_sensitivity = time_sensitivity if time_sensitivity != "oneMonth" else analyzed.get("time_sensitivity", "oneMonth")
+    final_info_types = required_info_types if required_info_types else analyzed.get("required_info_types", ["general"])
+
     criteria = {
-        "required_info_types": required_info_types or [],
+        "required_info_types": final_info_types,
         "min_sources": min_sources,
-        "time_sensitivity": time_sensitivity
+        "time_sensitivity": final_time_sensitivity,
+        "task_type": analyzed.get("task_type", "general"),
+        "entity": analyzed.get("entity"),
+        "topic": analyzed.get("topic"),
+        "success_criteria": analyzed.get("success_criteria")
     }
+
     _search_tracker.set_task(task, criteria)
+
     return {
         "status": "task_set",
         "task": task,
+        "analyzed_task": analyzed,
         "criteria": criteria,
+        "search_suggestions": {
+            "keywords": analyzed.get("search_keywords", []),
+            "time_sensitivity": final_time_sensitivity,
+            "recommended_sources": min_sources
+        },
         "message": f"搜索任务已设置: {task}"
     }
+
 
 
 def record_search_result(
@@ -401,25 +510,32 @@ def web_search(
         )
 
 
-def web_read(url: str) -> str:
-    """Extract main content from a webpage URL.
+def web_read(url: str) -> dict[str, Any]:
+    """Extract content from a webpage URL with LLM-based structured extraction.
 
-    Uses jina.ai reader to extract clean, readable text content from webpages.
-    Returns content in Markdown format.
+    Uses jina.ai reader to extract clean, readable text content from webpages,
+    then uses LLM to extract title, publication time, and main content.
 
     Args:
         url: The webpage URL to read (e.g., "https://example.com/article")
 
     Returns:
-        String containing the extracted main content in Markdown format
+        Dict containing:
+        - title: Extracted page title
+        - publish_time: Extracted publication time (format: YYYY-MM-DD, or None)
+        - content: Main content summary (~500 chars, extracted by LLM)
+        - raw_content: Full raw content from jina.ai
+        - url: The original URL
 
     Raises:
         httpx.HTTPStatusError: If the URL request fails
         ValueError: If URL is invalid or content cannot be extracted
 
     Example:
-        >>> content = web_read("https://www.example.com/news/article-123")
-        >>> print(content)  # Main article content in Markdown
+        >>> result = web_read("https://www.example.com/news/article-123")
+        >>> print(result['title'])
+        >>> print(result['publish_time'])
+        >>> print(result['content'])
     """
     # Validate URL
     if not url or not isinstance(url, str):
@@ -435,13 +551,57 @@ def web_read(url: str) -> str:
     response = httpx.get(reader_url, timeout=30.0, follow_redirects=True)
     response.raise_for_status()
 
-    content = response.text
+    raw_content = response.text
 
     # Check if content extraction was successful
-    if not content or len(content.strip()) < 50:
+    if not raw_content or len(raw_content.strip()) < 50:
         raise ValueError(f"Failed to extract meaningful content from {url}")
 
-    return content
+    # Use LLM to extract structured information
+    from langchain_openai import ChatOpenAI
+
+    llm = ChatOpenAI(
+        temperature=0.1,
+        model="glm-4-flash",
+        openai_api_key=os.environ.get("ZHIPUAI_API_KEY"),
+        openai_api_base="https://open.bigmodel.cn/api/paas/v4/"
+    )
+
+    # Truncate content if too long for LLM
+    max_chars = 8000
+    truncated_content = raw_content[:max_chars] if len(raw_content) > max_chars else raw_content
+
+    extraction_prompt = f"""请从以下网页内容中提取关键信息，并以JSON格式返回。
+
+网页内容：
+{truncated_content}
+
+请提取以下信息：
+1. title: 网页标题
+2. publish_time: 发布时间（格式：YYYY-MM-DD，如果没有找到请返回null）
+3. content: 主要内容摘要（保留关键信息，控制在500字以内）
+
+请直接返回JSON格式，不要包含```json标记：
+{{"title": "...", "publish_time": "..."或null, "content": "..."}}"""
+
+    llm_response = llm.invoke(extraction_prompt)
+    llm_content = llm_response.content.strip()
+
+    # Parse JSON response
+    # Remove potential markdown code blocks
+    if llm_content.startswith("```"):
+        llm_content = llm_content.split("\n", 1)[1]
+        llm_content = llm_content.rsplit("```", 1)[0]
+
+    extracted = json.loads(llm_content)
+
+    return {
+        "title": extracted.get("title"),
+        "publish_time": extracted.get("publish_time"),
+        "content": extracted.get("content", raw_content[:2000]),
+        "raw_content": raw_content,
+        "url": url
+    }
 
 
 # ============================================================================

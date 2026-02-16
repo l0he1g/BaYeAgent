@@ -12,3 +12,4 @@ wheels/
 .ipynb_checkpoints/
 log
 uv.lock
+.langgraph_api/

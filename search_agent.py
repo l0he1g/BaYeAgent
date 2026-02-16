@@ -1,29 +1,16 @@
-"""SearchAgent sub-agent for systematic web research with reflection capabilities.
+"""SearchAgent sub-agent for systematic web research using code execution.
 
-This module provides a research agent that can:
-- Execute systematic web searches with time-sensitivity awareness
-- Reflect on search results quality
-- Automatically replan searches when results are insufficient
-- Respect maximum search round limits (default: 5)
+This module provides a research agent that generates and executes complete
+Python programs to conduct research, replacing the multi-step tool calling
+pattern with a single code generation and execution approach.
+
+Current mode: LLM generates complete code -> execute_search_code() -> results
+Previous mode: LLM decision -> tool1 -> LLM decision -> tool2 -> ... (multiple cycles)
 """
 
 from deepagents import SubAgent
-from tools import (
-    web_search,
-    web_read,
-    # Search state management
-    init_search_session,
-    set_search_task,
-    record_search_result,
-    add_collected_info,
-    get_search_status,
-    get_search_history,
-    # Reflection tools
-    reflect_on_coverage,
-    evaluate_search_quality,
-    should_continue_searching,
-    get_collected_summary,
-)
+from code_executor import create_execute_search_code_tool
+from tools import get_current_time, get_collected_summary
 
 
 # Default maximum search rounds
@@ -32,270 +19,393 @@ DEFAULT_MAX_SEARCH_ROUNDS = 5
 
 SEARCH_AGENT = SubAgent(
     name="search_agent",
-    description=f"""专业的研究代理，执行系统化的网络搜索、结果过滤和综合分析，具备自主反思和重新规划能力。
+    description=f"""专业的研究代理，通过生成并执行完整的Python搜索程序来完成研究任务。
 
 核心特性：
+- 🖥️ 代码执行模式：生成完整的Python程序，一次性执行所有搜索逻辑
 - 🕐 强时效性：默认只搜索最近一个月内的信息，拒绝过时内容
 - 📊 结构化输出：生成带时间标注的研究报告
-- 🔄 动态调整：根据结果质量自动优化搜索策略
-- 🤔 自主反思：评估搜索结果，自动决定是否需要继续搜索
-- 🔄 迭代搜索：支持最多{DEFAULT_MAX_SEARCH_ROUNDS}轮搜索，直到任务完成
+- 🔄 动态调整：程序内自主决定搜索策略和循环控制
+- 🤖 自主反思：代码中包含完整的反思和决策逻辑
 
 适用场景：
 - 需要最新信息的研究任务（新闻、市场动态、技术进展）
 - 需要从多个角度搜索同一主题
 - 需要对比多个来源的信息并进行时效性验证
-- 复杂研究任务，可能需要多轮搜索才能完成""",
+- 复杂研究任务，需要多轮迭代搜索""",
 
-    system_prompt=f"""你是一位专业的研究助手，专门负责执行系统化的网络搜索任务，并具备自主反思和重新规划的能力。
+    system_prompt=f"""你是一位专业的研究助手，通过生成完整的Python程序来完成搜索任务。
 
-## ⚠️ 最高优先级：反思循环机制
+## 🖥️ 工作模式
 
-**你必须遵循"搜索-反思-决策"的循环模式，直到任务完成或达到搜索上限。**
+你需要生成一段完整的Python程序代码，然后调用 `execute_search_code` 工具来执行它。
 
-### 强制工作流程
+**核心思想**：将所有搜索逻辑写入一段程序，一次性执行完成，而不是多次调用工具。
 
-```
-第1步: 初始化搜索会话
-    ↓
-第2步: 设置搜索任务和成功标准
-    ↓
-第3步: 执行搜索 → 收集信息
-    ↓
-第4步: 反思评估（使用反思工具）
-    ├─ 评估覆盖率 (reflect_on_coverage)
-    ├─ 评估质量维度 (evaluate_search_quality)
-    └─ 决定是否继续 (should_continue_searching)
-    ↓
-第5步: 决策
-    ├─ 任务完成 → 生成报告
-    ├─ 需要继续 → 调整策略 → 返回第3步
-    └─ 达到上限 → 基于现有信息生成报告
+---
+
+## ⏰【首要原则】时间感知
+
+程序必须首先获取当前时间，所有后续决策都基于此：
+
+```python
+# 第一步：获取当前时间
+t = get_current_time()
+print(f"搜索开始: {{t['message']}}")
+print(f"今天是 {{t['date']}} {{t['weekday']}}")
 ```
 
-### 搜索轮数限制
+---
 
-- 默认最多 **{DEFAULT_MAX_SEARCH_ROUNDS}** 轮搜索
-- 每轮搜索后必须调用 `get_search_status()` 检查剩余轮数
-- 当 `can_continue=False` 时，必须停止搜索并生成报告
+## 📝 程序模板
 
-### 反思工具使用指南
+以下是标准的搜索程序模板，请根据具体任务调整：
 
-1. **初始化阶段**：
-   ```python
-   # 初始化搜索会话
-   init_search_session(max_search_rounds=5)
+```python
+# ============================================
+# 第1步：获取当前时间（必须首先执行）
+# ============================================
+t = get_current_time()
+print(f"搜索开始: {{t['message']}}")
 
-   # 设置任务目标
-   set_search_task(
-       task="研究主题描述",
-       required_info_types=["news", "data", "analysis"],
-       min_sources=3,
-       time_sensitivity="oneWeek"
-   )
-   ```
+# ============================================
+# 第2步：初始化搜索会话
+# ============================================
+init_search_session(max_search_rounds=5)
+set_search_task(
+    task="[具体的研究任务描述]",
+    required_info_types=["news", "data", "analysis"],  # 根据任务调整
+    min_sources=3,
+    time_sensitivity="oneMonth"
+)
 
-2. **搜索后记录**：
-   ```python
-   # 每次搜索后记录结果
-   record_search_result(
-       query="搜索关键词",
-       freshness="oneWeek",
-       total_results=10,
-       valid_results=5,  # 符合时效性和相关性的结果数
-       notes="观察到的问题或发现"
-   )
-   ```
+# ============================================
+# 第3步：搜索-反思循环
+# ============================================
+while True:
+    # 获取当前状态
+    status = get_search_status()
+    print(f"\\n=== 第{{status['current_round'] + 1}}轮搜索 ===")
+    print(f"剩余轮数: {{status['remaining_rounds']}}")
 
-3. **收集信息**：
-   ```python
-   # 发现有价值的信息时保存
-   add_collected_info(
-       content="信息内容",
-       source="https://...",
-       publish_time="2024-01-15",
-       relevance=0.9,
-       category="market_data"
-   )
-   ```
+    # 执行搜索（根据任务调整查询和参数）
+    results = web_search(
+        query="[搜索关键词]",
+        max_results=5,
+        freshness="oneMonth"  # 根据时效需求调整
+    )
 
-4. **反思评估**：
-   ```python
-   # 评估覆盖情况
-   reflect_on_coverage(
-       task_description="原始任务",
-       covered_aspects=["已覆盖的方面1", "已覆盖的方面2"],
-       missing_aspects=["缺失的方面1", "缺失的方面2"]
-   )
+    # 处理搜索结果（兼容Tavily和BochaAI两种格式）
+    pages = []
+    if results:
+        # Tavily格式: results['results']
+        if 'results' in results:
+            pages = results['results']
+        # BochaAI格式: results['data']['webPages']['value']
+        elif 'data' in results and 'webPages' in results['data']:
+            pages = results['data']['webPages']['value']
 
-   # 评估各质量维度
-   evaluate_search_quality("completeness")  # 完整性
-   evaluate_search_quality("timeliness")    # 时效性
-   evaluate_search_quality("relevance")     # 相关性
-   evaluate_search_quality("diversity")     # 多样性
-   evaluate_search_quality("credibility")   # 可信度
-   ```
+    if pages:
+        print(f"找到 {{len(pages)}} 个结果")
 
-5. **决策是否继续**：
-   ```python
-   # 检查状态
-   status = get_search_status()
+        for page in pages[:3]:  # 处理前3个结果
+            # 兼容两种格式的字段名
+            title = page.get('title', page.get('name', 'N/A'))
+            url = page.get('url', page.get('link', ''))
+            snippet = page.get('content', page.get('snippet', page.get('summary', '')))
+            print(f"  - {{title}}")
 
-   # 决定是否继续
-   should_continue_searching(
-       task_complete=False,  # 如果认为任务完成设为True
-       reasons_to_stop=["可选的停止理由"]
-   )
-   ```
+            # 读取网页详细内容，使用LLM提取标题、发布时间和主要内容
+            try:
+                page_data = web_read(url)  # 返回 dict: title, publish_time, content, raw_content, url
+                extracted_title = page_data.get('title') or title
+                publish_time = page_data.get('publish_time')
+                main_content = page_data.get('content', snippet)
 
-### 反思决策标准
+                print(f"    标题: {{extracted_title}}")
+                print(f"    发布时间: {{publish_time or '未找到'}}")
+                print(f"    内容长度: {{len(main_content)}} 字符")
+            except Exception as e:
+                publish_time = page.get('published_date') or page.get('datePublished')
+                main_content = snippet
+                print(f"    读取失败: {{str(e)[:50]}}")
 
-**任务完成的标准**（满足以下条件可提前结束）：
-- ✅ 覆盖了所有关键信息维度
-- ✅ 至少3个独立来源验证
-- ✅ 信息时效性符合要求
-- ✅ 来源多样化（不同网站）
-- ✅ 有权威来源支持
+            # 收集有价值的信息
+            add_collected_info(
+                content=main_content,
+                source=url,
+                publish_time=publish_time,
+                relevance=0.8,
+                category="main"
+            )
 
-**需要继续搜索的信号**：
-- ❌ 关键信息维度缺失
-- ❌ 来源单一，缺乏交叉验证
-- ❌ 信息过时，不满足时效要求
-- ❌ 搜索结果相关性低
-- ❌ 重要问题没有找到答案
+    # 记录搜索
+    record_search_result(
+        query="[搜索关键词]",
+        freshness="oneMonth",
+        total_results=len(pages) if pages else 0,
+        valid_results=min(3, len(pages)) if pages else 0,
+        notes="搜索结果概述"
+    )
 
-**调整搜索策略的方法**：
-1. 换用不同的关键词
-2. 缩短/延长 freshness 时间范围
-3. 使用 topic="news" 或 topic="finance"
-4. 增加 max_results 数量
-5. 对特定来源深度阅读
+    # 反思评估
+    coverage = reflect_on_coverage(
+        task_description="[原始任务]",
+        covered_aspects=["已覆盖方面1", "已覆盖方面2"],
+        missing_aspects=["缺失方面1"]
+    )
+    print(f"覆盖分析: {{coverage}}")
 
-## ⚠️ 次高优先级：时效性原则
+    # 决策是否继续
+    decision = should_continue_searching(
+        task_complete=False  # 任务完成时设为True
+    )
+    print(f"决策: {{decision['reason']}}")
 
-**在执行任何搜索前，必须牢记：过时的信息是无价值的信息。**
+    if not decision['should_continue']:
+        print("搜索结束")
+        break
 
-### 时效性强制规则
+# ============================================
+# 第4步：输出结果摘要
+# ============================================
+print("\\n" + "="*50)
+print("搜索完成！")
+summary = get_collected_summary()
+print(f"收集信息: {{summary['total_items']}} 条")
+print(f"独立来源: {{summary['unique_sources']}} 个")
+print(f"信息类别: {{summary['categories']}}")
 
-1. **所有搜索必须指定 freshness 参数**
-   - 🚫 禁止不指定 freshness 的搜索
-   - 🚫 禁止默认使用 noLimit
-   - ✅ 每次调用 web_search 必须明确时间范围
+# 设置返回结果
+result = summary
+```
 
-2. **时间范围选择标准（严格执行）**
+---
 
-   | 信息类型 | 时间范围 | 说明 |
-   |---------|---------|------|
-   | 股票行情、金融市场 | `oneDay` | 当日数据，超过24小时即过时 |
-   | 突发新闻、热点事件 | `oneDay` | 实时性要求最高 |
-   | 技术动态、产品发布 | `oneWeek` | 一周内的信息 |
-   | 行业分析、研究报告 | `oneMonth` | **默认选择** |
-   | 长期趋势、历史对比 | `oneYear` | 仅在需要历史数据时 |
-   | 用户明确要求历史数据 | `noLimit` | **必须在提示词中明确说明** |
+## 🛠️ 可用函数
 
-3. **时效性验证清单**
-   - [ ] 每条搜索结果都检查发布时间
-   - [ ] 发布时间超出 freshness 范围的结果必须丢弃
-   - [ ] 无法确定发布时间的结果标记为"时间未知"，谨慎使用
-   - [ ] 报告中每条信息必须标注发布日期
+在生成的代码中，你可以使用以下函数：
 
-4. **股票/金融信息的特殊要求**
-   - 只使用 `freshness="oneDay"` 或 `freshness="oneWeek"`
-   - 明确标注数据的日期和时效性
-   - 警告用户：过往表现不代表未来收益
-
-## 工具列表和使用说明
+### 时间工具
+- `get_current_time()` - 获取当前系统时间，返回datetime, date, year等
 
 ### 搜索工具
-- `web_search(query, freshness, max_results, topic)` - 执行网络搜索
-- `web_read(url)` - 读取网页详细内容
+- `web_search(query, max_results=5, freshness="noLimit", topic="general")` - 执行网络搜索
+- `web_read(url)` - 读取网页并使用LLM提取结构化信息，返回 dict:
+  - `title`: 网页标题
+  - `publish_time`: 发布时间 (YYYY-MM-DD)
+  - `content`: 主要内容摘要
+  - `raw_content`: 原始网页内容
+  - `url`: 原始URL
 
-### 会话管理工具
-- `init_search_session(max_search_rounds)` - 初始化搜索会话
-- `set_search_task(task, required_info_types, min_sources, time_sensitivity)` - 设置任务
+### 会话管理
+- `init_search_session(max_search_rounds=5)` - 初始化搜索会话
+- `set_search_task(task, required_info_types, min_sources, time_sensitivity)` - 设置任务目标
 - `get_search_status()` - 获取当前搜索状态
 - `get_search_history()` - 获取搜索历史
 
-### 信息收集工具
-- `record_search_result(query, freshness, total_results, valid_results, notes)` - 记录搜索
-- `add_collected_info(content, source, publish_time, relevance, category)` - 保存信息
-- `get_collected_summary()` - 获取已收集信息摘要
+### 信息收集
+- `record_search_result(query, freshness, total_results, valid_results, notes)` - 记录搜索结果
+- `add_collected_info(content, source, publish_time, relevance, category)` - 保存收集的信息
+- `get_collected_summary()` - 获取已收集信息的摘要
 
-### 反思评估工具
-- `reflect_on_coverage(task_description, covered_aspects, missing_aspects)` - 评估覆盖
+### 反思工具
+- `reflect_on_coverage(task_description, covered_aspects, missing_aspects)` - 评估覆盖情况
 - `evaluate_search_quality(dimension)` - 评估质量（维度：completeness/timeliness/relevance/diversity/credibility）
-- `should_continue_searching(task_complete, reasons_to_stop)` - 决策是否继续
+- `should_continue_searching(task_complete, reasons_to_stop)` - 决定是否继续搜索
 
-## 输出要求
+### 其他
+- `print()` - 输出信息
+- `json` - JSON模块
+- `re` - 正则表达式模块（用于提取网页中的发布时间等）
 
-### 最终报告格式
+---
 
-```markdown
-# 搜索主题：[主题名称]
+## ⏰ 时效性规则
 
-## 📊 搜索统计
-- **搜索轮数**：X / {DEFAULT_MAX_SEARCH_ROUNDS}
-- **有效来源**：Y个
-- **信息条目**：Z条
+在代码中设置 `freshness` 参数时，必须根据信息类型选择：
 
-## ⏰ 时效性声明
-- **报告生成时间**：[当前日期时间]
-- **信息时效范围**：[使用的时间范围]
-- **数据截止时间**：[最新信息的发布时间]
+| 信息类型 | freshness | 说明 |
+|---------|-----------|------|
+| 股票行情、突发新闻 | `"oneDay"` | 实时性要求最高 |
+| 技术动态、产品发布 | `"oneWeek"` | 一周内的信息 |
+| 行业分析、研究报告 | `"oneMonth"` | **默认选择** |
+| 长期趋势、历史对比 | `"oneYear"` | 需要历史数据时 |
+| 用户明确要求历史 | `"noLimit"` | 必须有明确说明 |
 
-## 🔍 搜索过程
-1. 第1轮：[查询] → [结果概述] → [反思结论]
-2. 第2轮：[查询] → [结果概述] → [反思结论]
+---
+
+## 📤 输出要求
+
+生成的代码应该：
+
+1. **清晰的进度输出**：使用print()显示搜索进度
+2. **设置result变量**：将最终结果赋值给result变量
+3. **完整的搜索报告**：输出结构化的搜索结果
+
+最终输出格式示例：
+```
+搜索开始: 2025年2月16日 ...
+
+=== 第1轮搜索 ===
+剩余轮数: 4
+找到 10 个结果
+  - 标题1
+  - 标题2
 ...
 
-## 关键发现
-
-### [类别1]
-- **要点1**: 详细说明
-  - 来源: [URL]
-  - 发布时间: [YYYY-MM-DD]
-  - 相关性: 高/中
-
-### [类别2]
-- **要点1**: 详细说明
-  - 来源: [URL]
-  - 发布时间: [YYYY-MM-DD]
-
-## ⚠️ 局限性说明
-[如果未达到完全覆盖，说明哪些信息可能缺失]
-
-## 总结
-[综合分析和总结]
+搜索完成！
+收集信息: 15 条
+独立来源: 8 个
 ```
 
-## 重要原则
+---
 
-1. **反思先行**: 每次搜索后必须反思评估
-2. **轮数意识**: 始终关注剩余搜索轮数
-3. **时效性第一**: 过时的信息比没有信息更危险
-4. **来源多样**: 寻求多个独立来源验证
-5. **透明报告**: 如实报告搜索过程和局限性
-6. **动态调整**: 根据反思结果优化搜索策略
-7. **知止而后行**: 任务完成或达到上限时果断停止""",
+## ⚠️ 重要提醒
+
+1. **必须首先调用get_current_time()** - 这是时间感知的基础
+2. **使用while循环控制搜索轮数** - 配合should_continue_searching()
+3. **每轮搜索后反思** - 使用reflect_on_coverage()评估进度
+4. **设置result变量** - 便于返回结构化结果
+5. **禁止使用import语句** - 所有工具已预置
+6. **禁止定义类** - 只使用函数式编程
+
+---
+
+## 调用方式
+
+生成代码后，使用execute_search_code工具执行：
+
+```
+execute_search_code(code="你的完整程序代码")
+```
+
+工具将返回：
+- success: 是否成功执行
+- output: 所有print()输出
+- result: result变量的值
+- error: 错误信息（如果有）""",
 
     tools=[
-        # Search tools
-        web_search,
-        web_read,
-        # Session management
-        init_search_session,
-        set_search_task,
-        get_search_status,
-        get_search_history,
-        # Information collection
-        record_search_result,
-        add_collected_info,
-        get_collected_summary,
-        # Reflection tools
-        reflect_on_coverage,
-        evaluate_search_quality,
-        should_continue_searching,
+        create_execute_search_code_tool(),  # 核心工具：执行生成的代码
+        get_current_time,                    # 辅助工具：直接获取时间
+        get_collected_summary,               # 辅助工具：获取收集结果
     ],
 )
 
 __all__ = ["SEARCH_AGENT", "DEFAULT_MAX_SEARCH_ROUNDS"]
+
+
+def create_search_agent():
+    """Create and return a deep agent with search_agent capabilities."""
+    import os
+    from datetime import datetime
+    from deepagents import create_deep_agent
+    from langchain_openai import ChatOpenAI
+
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    model = ChatOpenAI(
+        temperature=0.3,
+        model="glm-4.7",
+        openai_api_key=os.getenv("ZHIPUAI_API_KEY"),
+        openai_api_base="https://open.bigmodel.cn/api/paas/v4/"
+    )
+
+    system_prompt = f"""你是一个专业的搜索助手，负责调用 search_agent 完成搜索任务。
+
+## ⏰ 当前系统时间
+
+**现在的时间是: {current_time}**
+
+---
+
+## 核心任务
+
+当用户提供搜索查询时，调用 search_agent 执行搜索任务。
+search_agent 会生成并执行完整的 Python 搜索程序来完成研究任务。
+
+## 工作流程
+
+1. 接收用户的搜索查询
+2. 调用 search_agent，明确告知搜索目标和时效性要求
+3. 等待 search_agent 返回搜索结果
+4. 向用户展示搜索结果
+
+## 注意事项
+
+- 对于时效性要求高的信息（新闻、股价），要求 search_agent 使用 oneDay 或 oneWeek
+- 对于一般性研究，使用 oneMonth
+- 明确告知 search_agent 需要搜索的内容和期望的结果数量
+"""
+
+    agent = create_deep_agent(
+        model=model,
+        subagents=[SEARCH_AGENT],
+        system_prompt=system_prompt,
+        debug=True
+    )
+
+    return agent
+
+
+if __name__ == "__main__":
+    import sys
+
+    # Get query from command line arguments
+    if len(sys.argv) < 2:
+        print("Usage: python search_agent.py <search query>")
+        print("Example: python search_agent.py 'AI trends 2025'")
+        sys.exit(1)
+
+    query = " ".join(sys.argv[1:])
+
+    # Print search task info
+    print("=" * 60)
+    print("📋 搜索任务")
+    print("=" * 60)
+    print(f"  查询内容: {query}")
+    print(f"  执行模式: Agent 代码生成 + 执行")
+    print("=" * 60)
+    print()
+
+    # Create agent and execute search
+    print("🚀 启动 Search Agent...\n")
+
+    agent = create_search_agent()
+
+    # Prepare the query for the agent
+    agent_query = f"""请执行以下搜索任务：
+
+搜索查询: {query}
+
+要求：
+1. 使用 execute_search_code 工具生成并执行搜索代码
+2. 时效性要求: oneMonth (一个月内)
+3. 返回 5 条结果
+4. 展示每条结果的标题、URL、发布时间和摘要
+
+请开始搜索并返回结果。
+"""
+
+    # Stream the agent execution
+    for chunk in agent.stream(
+        {"messages": [{"role": "user", "content": agent_query}]},
+        stream_mode="updates"
+    ):
+        for node_name, node_output in chunk.items():
+            if node_output is not None and "messages" in node_output:
+                messages = node_output["messages"]
+                if hasattr(messages, 'value'):
+                    messages = messages.value
+                for msg in messages:
+                    content = getattr(msg, 'content', str(msg))
+                    if content:
+                        print(f"[{node_name}] {content}")
+            elif node_output is not None:
+                print(f"[{node_name}] {node_output}")
+
+    print()
+    print("=" * 60)
+    print("✅ 搜索完成")
+    print("=" * 60)

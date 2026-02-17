@@ -10,11 +10,12 @@ from code_executor import execute_search_code
 from tools import get_current_time, get_collected_summary
 
 
-# 股票研究代码模板 - 六维度分析
+# 股票研究代码模板 - 六维度分析（使用LLM智能重排）
 STOCK_RESEARCH_CODE_TEMPLATE = '''
 # ============================================
 # 股票研究程序 - 六维度价值分析
 # 股票: {stock_name} ({stock_code})
+# 使用LLM智能重排提升搜索质量
 # ============================================
 
 # 第1步：获取当前时间（必须首先执行）
@@ -43,243 +44,288 @@ research_data = {{
 }}
 
 # ============================================
-# 维度一：公司基本面分析
+# 维度一：公司基本面分析（智能重排）
 # ============================================
 print("\\n📌 [维度1/6] 公司基本面分析")
 print("-" * 40)
 
-results_1 = web_search(
+# 使用智能重排：召回50条 → LLM筛选最优5条
+search_1 = web_search_with_rerank(
     query="{stock_name} 财务报告 营收 利润 ROE",
-    max_results=5,
+    task_description="{stock_name}公司基本面和财务数据分析",
+    max_results=50,
+    top_k=5,
+    topic="finance",
     freshness="oneMonth"
 )
 
-pages_1 = results_1.get('results', []) if 'results' in results_1 else results_1.get('data', {{}}).get('webPages', {{}}).get('value', [])
-print(f"搜索到 {{len(pages_1)}} 条基本面信息")
+print(f"搜索到 {{search_1['total_found']}} 条 → LLM筛选最优 {{search_1['total_returned']}} 条")
+print(f"重排摘要: {{search_1['rerank_summary']}}")
 
 fundamentals = []
-for page in pages_1[:3]:
-    title = page.get('title', page.get('name', 'N/A'))
-    url = page.get('url', page.get('link', ''))
-    snippet = page.get('content', page.get('snippet', page.get('summary', '')))
-    print(f"  - {{title}}")
+for item in search_1['results']:
+    title = item['title']
+    url = item['url']
+    score = item.get('llm_score', 0)
+    reason = item.get('llm_reason', '')
+    is_auth = item.get('is_authoritative', False)
+
+    print(f"  [{{score}}分] {{title}}")
+    print(f"    理由: {{reason}}")
+    print(f"    来源: {{item['domain']}} {{'★权威' if is_auth else ''}}")
 
     try:
-        content = web_read(url)
-        # 提取关键财务指标
-        main_content = content[:2000]
-        fundamentals.append({{"title": title, "url": url, "content": main_content}})
-        add_collected_info(content=main_content, source=url, relevance=0.9, category="fundamentals")
+        page_data = web_read(url)
+        main_content = page_data.get('content', item.get('snippet', ''))
+        publish_time = page_data.get('publish_time')
+        fundamentals.append({{"title": title, "url": url, "content": main_content, "score": score}})
+        add_collected_info(content=main_content, source=url, publish_time=publish_time, relevance=score/100, category="fundamentals")
     except Exception as e:
-        fundamentals.append({{"title": title, "url": url, "snippet": snippet}})
-        add_collected_info(content=snippet, source=url, relevance=0.7, category="fundamentals")
+        fundamentals.append({{"title": title, "url": url, "snippet": item.get('snippet', ''), "score": score}})
+        add_collected_info(content=item.get('snippet', ''), source=url, relevance=score/100, category="fundamentals")
+        print(f"    读取失败: {{str(e)[:50]}}")
 
 record_search_result(
     query="{stock_name} 财务报告",
     freshness="oneMonth",
-    total_results=len(pages_1),
+    total_results=search_1['total_found'],
     valid_results=len(fundamentals),
-    notes="基本面信息收集"
+    notes=search_1['rerank_summary']
 )
 research_data["dimensions"]["fundamentals"] = fundamentals
 
 # ============================================
-# 维度二：最新公司新闻
+# 维度二：最新公司新闻（智能重排）
 # ============================================
 print("\\n📌 [维度2/6] 最新公司新闻")
 print("-" * 40)
 
-results_2 = web_search(
+# 使用智能重排：时效性要求 oneWeek
+search_2 = web_search_with_rerank(
     query="{stock_name} 最新消息 新闻",
-    max_results=5,
+    task_description="{stock_name}公司最新动态和新闻",
+    max_results=50,
+    top_k=5,
+    topic="news",
     freshness="oneWeek"
 )
 
-pages_2 = results_2.get('results', []) if 'results' in results_2 else results_2.get('data', {{}}).get('webPages', {{}}).get('value', [])
-print(f"搜索到 {{len(pages_2)}} 条新闻")
+print(f"搜索到 {{search_2['total_found']}} 条 → LLM筛选最优 {{search_2['total_returned']}} 条")
+print(f"重排摘要: {{search_2['rerank_summary']}}")
 
 news_items = []
-for page in pages_2[:3]:
-    title = page.get('title', page.get('name', 'N/A'))
-    url = page.get('url', page.get('link', ''))
-    snippet = page.get('content', page.get('snippet', page.get('summary', '')))
-    print(f"  - {{title}}")
+for item in search_2['results']:
+    title = item['title']
+    url = item['url']
+    score = item.get('llm_score', 0)
+    reason = item.get('llm_reason', '')
+    is_auth = item.get('is_authoritative', False)
+
+    print(f"  [{{score}}分] {{title}}")
+    print(f"    理由: {{reason}}")
+    print(f"    来源: {{item['domain']}} {{'★权威' if is_auth else ''}}")
 
     try:
-        content = web_read(url)
-        main_content = content[:2000]
-        news_items.append({{"title": title, "url": url, "content": main_content}})
-        add_collected_info(content=main_content, source=url, relevance=0.85, category="news")
+        page_data = web_read(url)
+        main_content = page_data.get('content', item.get('snippet', ''))
+        publish_time = page_data.get('publish_time')
+        news_items.append({{"title": title, "url": url, "content": main_content, "score": score}})
+        add_collected_info(content=main_content, source=url, publish_time=publish_time, relevance=score/100, category="news")
     except Exception as e:
-        news_items.append({{"title": title, "url": url, "snippet": snippet}})
-        add_collected_info(content=snippet, source=url, relevance=0.6, category="news")
+        news_items.append({{"title": title, "url": url, "snippet": item.get('snippet', ''), "score": score}})
+        add_collected_info(content=item.get('snippet', ''), source=url, relevance=score/100, category="news")
+        print(f"    读取失败: {{str(e)[:50]}}")
 
 record_search_result(
     query="{stock_name} 最新消息",
     freshness="oneWeek",
-    total_results=len(pages_2),
+    total_results=search_2['total_found'],
     valid_results=len(news_items),
-    notes="最新新闻收集"
+    notes=search_2['rerank_summary']
 )
 research_data["dimensions"]["news"] = news_items
 
 # ============================================
-# 维度三：股价估值分析
+# 维度三：股价估值分析（智能重排）
 # ============================================
 print("\\n📌 [维度3/6] 股价估值分析")
 print("-" * 40)
 
-results_3 = web_search(
+search_3 = web_search_with_rerank(
     query="{stock_name} 股价 PE 估值 PB",
-    max_results=5,
+    task_description="{stock_name}股价估值水平分析",
+    max_results=50,
+    top_k=5,
+    topic="finance",
     freshness="oneWeek"
 )
 
-pages_3 = results_3.get('results', []) if 'results' in results_3 else results_3.get('data', {{}}).get('webPages', {{}}).get('value', [])
-print(f"搜索到 {{len(pages_3)}} 条估值信息")
+print(f"搜索到 {{search_3['total_found']}} 条 → LLM筛选最优 {{search_3['total_returned']}} 条")
+print(f"重排摘要: {{search_3['rerank_summary']}}")
 
 valuation_data = []
-for page in pages_3[:3]:
-    title = page.get('title', page.get('name', 'N/A'))
-    url = page.get('url', page.get('link', ''))
-    snippet = page.get('content', page.get('snippet', page.get('summary', '')))
-    print(f"  - {{title}}")
+for item in search_3['results']:
+    title = item['title']
+    url = item['url']
+    score = item.get('llm_score', 0)
+    reason = item.get('llm_reason', '')
+
+    print(f"  [{{score}}分] {{title}}")
+    print(f"    理由: {{reason}}")
 
     try:
-        content = web_read(url)
-        main_content = content[:2000]
-        valuation_data.append({{"title": title, "url": url, "content": main_content}})
-        add_collected_info(content=main_content, source=url, relevance=0.9, category="valuation")
+        page_data = web_read(url)
+        main_content = page_data.get('content', item.get('snippet', ''))
+        valuation_data.append({{"title": title, "url": url, "content": main_content, "score": score}})
+        add_collected_info(content=main_content, source=url, relevance=score/100, category="valuation")
     except Exception as e:
-        valuation_data.append({{"title": title, "url": url, "snippet": snippet}})
-        add_collected_info(content=snippet, source=url, relevance=0.7, category="valuation")
+        valuation_data.append({{"title": title, "url": url, "snippet": item.get('snippet', ''), "score": score}})
+        add_collected_info(content=item.get('snippet', ''), source=url, relevance=score/100, category="valuation")
 
 record_search_result(
     query="{stock_name} 股价估值",
     freshness="oneWeek",
-    total_results=len(pages_3),
+    total_results=search_3['total_found'],
     valid_results=len(valuation_data),
-    notes="估值数据收集"
+    notes=search_3['rerank_summary']
 )
 research_data["dimensions"]["valuation"] = valuation_data
 
 # ============================================
-# 维度四：高管动态
+# 维度四：高管动态（智能重排）
 # ============================================
 print("\\n📌 [维度4/6] 高管动态")
 print("-" * 40)
 
-results_4 = web_search(
+search_4 = web_search_with_rerank(
     query="{stock_name} 高管变动 董事长 总经理 增持减持",
-    max_results=5,
+    task_description="{stock_name}公司管理层动态和股权变动",
+    max_results=50,
+    top_k=5,
+    topic="finance",
     freshness="oneMonth"
 )
 
-pages_4 = results_4.get('results', []) if 'results' in results_4 else results_4.get('data', {{}}).get('webPages', {{}}).get('value', [])
-print(f"搜索到 {{len(pages_4)}} 条高管信息")
+print(f"搜索到 {{search_4['total_found']}} 条 → LLM筛选最优 {{search_4['total_returned']}} 条")
+print(f"重排摘要: {{search_4['rerank_summary']}}")
 
 management_info = []
-for page in pages_4[:3]:
-    title = page.get('title', page.get('name', 'N/A'))
-    url = page.get('url', page.get('link', ''))
-    snippet = page.get('content', page.get('snippet', page.get('summary', '')))
-    print(f"  - {{title}}")
+for item in search_4['results']:
+    title = item['title']
+    url = item['url']
+    score = item.get('llm_score', 0)
+    reason = item.get('llm_reason', '')
+
+    print(f"  [{{score}}分] {{title}}")
+    print(f"    理由: {{reason}}")
 
     try:
-        content = web_read(url)
-        main_content = content[:2000]
-        management_info.append({{"title": title, "url": url, "content": main_content}})
-        add_collected_info(content=main_content, source=url, relevance=0.8, category="management")
+        page_data = web_read(url)
+        main_content = page_data.get('content', item.get('snippet', ''))
+        management_info.append({{"title": title, "url": url, "content": main_content, "score": score}})
+        add_collected_info(content=main_content, source=url, relevance=score/100, category="management")
     except Exception as e:
-        management_info.append({{"title": title, "url": url, "snippet": snippet}})
-        add_collected_info(content=snippet, source=url, relevance=0.6, category="management")
+        management_info.append({{"title": title, "url": url, "snippet": item.get('snippet', ''), "score": score}})
+        add_collected_info(content=item.get('snippet', ''), source=url, relevance=score/100, category="management")
 
 record_search_result(
     query="{stock_name} 高管动态",
     freshness="oneMonth",
-    total_results=len(pages_4),
+    total_results=search_4['total_found'],
     valid_results=len(management_info),
-    notes="高管信息收集"
+    notes=search_4['rerank_summary']
 )
 research_data["dimensions"]["management"] = management_info
 
 # ============================================
-# 维度五：行业趋势
+# 维度五：行业趋势（智能重排）
 # ============================================
 print("\\n📌 [维度5/6] 行业趋势")
 print("-" * 40)
 
-results_5 = web_search(
+search_5 = web_search_with_rerank(
     query="{industry} 行业趋势 前景 景气度",
-    max_results=5,
+    task_description="{industry}行业发展趋势和前景分析",
+    max_results=50,
+    top_k=5,
+    topic="general",
     freshness="oneMonth"
 )
 
-pages_5 = results_5.get('results', []) if 'results' in results_5 else results_5.get('data', {{}}).get('webPages', {{}}).get('value', [])
-print(f"搜索到 {{len(pages_5)}} 条行业信息")
+print(f"搜索到 {{search_5['total_found']}} 条 → LLM筛选最优 {{search_5['total_returned']}} 条")
+print(f"重排摘要: {{search_5['rerank_summary']}}")
 
 industry_info = []
-for page in pages_5[:3]:
-    title = page.get('title', page.get('name', 'N/A'))
-    url = page.get('url', page.get('link', ''))
-    snippet = page.get('content', page.get('snippet', page.get('summary', '')))
-    print(f"  - {{title}}")
+for item in search_5['results']:
+    title = item['title']
+    url = item['url']
+    score = item.get('llm_score', 0)
+    reason = item.get('llm_reason', '')
+
+    print(f"  [{{score}}分] {{title}}")
+    print(f"    理由: {{reason}}")
 
     try:
-        content = web_read(url)
-        main_content = content[:2000]
-        industry_info.append({{"title": title, "url": url, "content": main_content}})
-        add_collected_info(content=main_content, source=url, relevance=0.75, category="industry")
+        page_data = web_read(url)
+        main_content = page_data.get('content', item.get('snippet', ''))
+        industry_info.append({{"title": title, "url": url, "content": main_content, "score": score}})
+        add_collected_info(content=main_content, source=url, relevance=score/100, category="industry")
     except Exception as e:
-        industry_info.append({{"title": title, "url": url, "snippet": snippet}})
-        add_collected_info(content=snippet, source=url, relevance=0.5, category="industry")
+        industry_info.append({{"title": title, "url": url, "snippet": item.get('snippet', ''), "score": score}})
+        add_collected_info(content=item.get('snippet', ''), source=url, relevance=score/100, category="industry")
 
 record_search_result(
     query="{industry} 行业趋势",
     freshness="oneMonth",
-    total_results=len(pages_5),
+    total_results=search_5['total_found'],
     valid_results=len(industry_info),
-    notes="行业分析收集"
+    notes=search_5['rerank_summary']
 )
 research_data["dimensions"]["industry"] = industry_info
 
 # ============================================
-# 维度六：机构观点
+# 维度六：机构观点（智能重排）
 # ============================================
 print("\\n📌 [维度6/6] 机构观点")
 print("-" * 40)
 
-results_6 = web_search(
+search_6 = web_search_with_rerank(
     query="{stock_name} 券商研报 目标价 评级 机构调研",
-    max_results=5,
+    task_description="{stock_name}券商研报和机构投资观点",
+    max_results=50,
+    top_k=5,
+    topic="finance",
     freshness="oneMonth"
 )
 
-pages_6 = results_6.get('results', []) if 'results' in results_6 else results_6.get('data', {{}}).get('webPages', {{}}).get('value', [])
-print(f"搜索到 {{len(pages_6)}} 条机构观点")
+print(f"搜索到 {{search_6['total_found']}} 条 → LLM筛选最优 {{search_6['total_returned']}} 条")
+print(f"重排摘要: {{search_6['rerank_summary']}}")
 
 analyst_views = []
-for page in pages_6[:3]:
-    title = page.get('title', page.get('name', 'N/A'))
-    url = page.get('url', page.get('link', ''))
-    snippet = page.get('content', page.get('snippet', page.get('summary', '')))
-    print(f"  - {{title}}")
+for item in search_6['results']:
+    title = item['title']
+    url = item['url']
+    score = item.get('llm_score', 0)
+    reason = item.get('llm_reason', '')
+
+    print(f"  [{{score}}分] {{title}}")
+    print(f"    理由: {{reason}}")
 
     try:
-        content = web_read(url)
-        main_content = content[:2000]
-        analyst_views.append({{"title": title, "url": url, "content": main_content}})
-        add_collected_info(content=main_content, source=url, relevance=0.85, category="analyst")
+        page_data = web_read(url)
+        main_content = page_data.get('content', item.get('snippet', ''))
+        analyst_views.append({{"title": title, "url": url, "content": main_content, "score": score}})
+        add_collected_info(content=main_content, source=url, relevance=score/100, category="analyst")
     except Exception as e:
-        analyst_views.append({{"title": title, "url": url, "snippet": snippet}})
-        add_collected_info(content=snippet, source=url, relevance=0.6, category="analyst")
+        analyst_views.append({{"title": title, "url": url, "snippet": item.get('snippet', ''), "score": score}})
+        add_collected_info(content=item.get('snippet', ''), source=url, relevance=score/100, category="analyst")
 
 record_search_result(
     query="{stock_name} 券商研报",
     freshness="oneMonth",
-    total_results=len(pages_6),
+    total_results=search_6['total_found'],
     valid_results=len(analyst_views),
-    notes="机构观点收集"
+    notes=search_6['rerank_summary']
 )
 research_data["dimensions"]["analyst"] = analyst_views
 

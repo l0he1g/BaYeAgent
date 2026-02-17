@@ -23,6 +23,7 @@ SEARCH_AGENT = SubAgent(
 
 核心特性：
 - 🖥️ 代码执行模式：生成完整的Python程序，一次性执行所有搜索逻辑
+- 🔍 LLM智能重排：扩大召回50条，使用LLM筛选最优10条
 - 🕐 强时效性：默认只搜索最近一个月内的信息，拒绝过时内容
 - 📊 结构化输出：生成带时间标注的研究报告
 - 🔄 动态调整：程序内自主决定搜索策略和循环控制
@@ -44,6 +45,37 @@ SEARCH_AGENT = SubAgent(
 
 ---
 
+## 🔍【推荐】使用LLM智能重排
+
+为了获得更高质量的搜索结果，**强烈推荐使用 `web_search_with_rerank`**：
+
+```python
+# 推荐：使用智能重排搜索（召回50条 → LLM筛选最优10条）
+search_result = web_search_with_rerank(
+    query="搜索关键词",
+    task_description="具体的研究任务描述",
+    max_results=50,       # 召回50条
+    top_k=10,             # LLM筛选出最优10条
+    freshness="oneMonth"
+)
+
+# search_result['results'] 是经过LLM重排后的最优结果
+for item in search_result['results']:
+    print(f"[{{item['llm_score']}}分] {{item['title']}}")
+    print(f"  选中理由: {{item['llm_reason']}}")
+    print(f"  来源: {{item['domain']}} ({{'权威' if item['is_authoritative'] else '普通'}})")
+```
+
+### 重排评估维度
+
+LLM会根据以下维度综合评分：
+1. **信息价值 (40%)**：与任务的相关性，是否包含关键信息
+2. **时效性 (30%)**：发布时间是否满足要求，越新鲜越好
+3. **内容质量 (20%)**：信息是否详实、具体、有深度
+4. **来源权威性 (10%)**：网站在该领域是否权威
+
+---
+
 ## ⏰【首要原则】时间感知
 
 程序必须首先获取当前时间，所有后续决策都基于此：
@@ -57,9 +89,9 @@ print(f"今天是 {{t['date']}} {{t['weekday']}}")
 
 ---
 
-## 📝 程序模板
+## 📝 程序模板（推荐使用重排）
 
-以下是标准的搜索程序模板，请根据具体任务调整：
+以下是标准的搜索程序模板，使用LLM智能重排提升质量：
 
 ```python
 # ============================================
@@ -80,91 +112,66 @@ set_search_task(
 )
 
 # ============================================
-# 第3步：搜索-反思循环
+# 第3步：使用智能重排搜索（推荐）
 # ============================================
-while True:
-    # 获取当前状态
-    status = get_search_status()
-    print(f"\\n=== 第{{status['current_round'] + 1}}轮搜索 ===")
-    print(f"剩余轮数: {{status['remaining_rounds']}}")
+print("\\n=== 执行智能搜索 ===")
 
-    # 执行搜索（根据任务调整查询和参数）
-    results = web_search(
-        query="[搜索关键词]",
-        max_results=5,
-        freshness="oneMonth"  # 根据时效需求调整
+# 使用 web_search_with_rerank：召回50条 → LLM筛选最优10条
+search_result = web_search_with_rerank(
+    query="[搜索关键词]",
+    task_description="[具体的研究任务描述]",
+    max_results=50,       # 扩大召回范围
+    top_k=10,             # LLM筛选最优结果
+    freshness="oneMonth"
+)
+
+print(f"搜索到 {{search_result['total_found']}} 条结果")
+print(f"重排摘要: {{search_result['rerank_summary']}}")
+print(f"返回最优 {{search_result['total_returned']}} 条\\n")
+
+# 处理重排后的结果
+for item in search_result['results']:
+    title = item['title']
+    url = item['url']
+    score = item.get('llm_score', 0)
+    reason = item.get('llm_reason', '')
+    is_auth = item.get('is_authoritative', False)
+
+    print(f"[{{score}}分] {{title}}")
+    print(f"  理由: {{reason}}")
+    print(f"  来源: {{item['domain']}} {{'★权威' if is_auth else ''}}")
+
+    # 读取网页详细内容
+    try:
+        page_data = web_read(url)
+        main_content = page_data.get('content', item.get('snippet', ''))
+        publish_time = page_data.get('publish_time')
+
+        print(f"  发布时间: {{publish_time or '未知'}}")
+        print(f"  内容长度: {{len(main_content)}} 字符")
+    except Exception as e:
+        main_content = item.get('snippet', '')
+        publish_time = item.get('publish_time')
+        print(f"  读取失败: {{str(e)[:50]}}")
+
+    # 收集有价值的信息
+    add_collected_info(
+        content=main_content,
+        source=url,
+        publish_time=publish_time,
+        relevance=score / 100,  # 转换为0-1范围
+        category="main"
     )
+    print()
 
-    # 处理搜索结果（兼容Tavily和BochaAI两种格式）
-    pages = []
-    if results:
-        # Tavily格式: results['results']
-        if 'results' in results:
-            pages = results['results']
-        # BochaAI格式: results['data']['webPages']['value']
-        elif 'data' in results and 'webPages' in results['data']:
-            pages = results['data']['webPages']['value']
-
-    if pages:
-        print(f"找到 {{len(pages)}} 个结果")
-
-        for page in pages[:3]:  # 处理前3个结果
-            # 兼容两种格式的字段名
-            title = page.get('title', page.get('name', 'N/A'))
-            url = page.get('url', page.get('link', ''))
-            snippet = page.get('content', page.get('snippet', page.get('summary', '')))
-            print(f"  - {{title}}")
-
-            # 读取网页详细内容，使用LLM提取标题、发布时间和主要内容
-            try:
-                page_data = web_read(url)  # 返回 dict: title, publish_time, content, raw_content, url
-                extracted_title = page_data.get('title') or title
-                publish_time = page_data.get('publish_time')
-                main_content = page_data.get('content', snippet)
-
-                print(f"    标题: {{extracted_title}}")
-                print(f"    发布时间: {{publish_time or '未找到'}}")
-                print(f"    内容长度: {{len(main_content)}} 字符")
-            except Exception as e:
-                publish_time = page.get('published_date') or page.get('datePublished')
-                main_content = snippet
-                print(f"    读取失败: {{str(e)[:50]}}")
-
-            # 收集有价值的信息
-            add_collected_info(
-                content=main_content,
-                source=url,
-                publish_time=publish_time,
-                relevance=0.8,
-                category="main"
-            )
-
-    # 记录搜索
-    record_search_result(
-        query="[搜索关键词]",
-        freshness="oneMonth",
-        total_results=len(pages) if pages else 0,
-        valid_results=min(3, len(pages)) if pages else 0,
-        notes="搜索结果概述"
-    )
-
-    # 反思评估
-    coverage = reflect_on_coverage(
-        task_description="[原始任务]",
-        covered_aspects=["已覆盖方面1", "已覆盖方面2"],
-        missing_aspects=["缺失方面1"]
-    )
-    print(f"覆盖分析: {{coverage}}")
-
-    # 决策是否继续
-    decision = should_continue_searching(
-        task_complete=False  # 任务完成时设为True
-    )
-    print(f"决策: {{decision['reason']}}")
-
-    if not decision['should_continue']:
-        print("搜索结束")
-        break
+# 记录搜索
+record_search_result(
+    query="[搜索关键词]",
+    freshness="oneMonth",
+    total_results=search_result['total_found'],
+    valid_results=search_result['total_returned'],
+    notes=search_result['rerank_summary']
+)
 
 # ============================================
 # 第4步：输出结果摘要
@@ -189,14 +196,18 @@ result = summary
 ### 时间工具
 - `get_current_time()` - 获取当前系统时间，返回datetime, date, year等
 
-### 搜索工具
-- `web_search(query, max_results=5, freshness="noLimit", topic="general")` - 执行网络搜索
+### 搜索工具（推荐使用重排版本）
+- `web_search_with_rerank(query, task_description, max_results=50, top_k=10, topic, freshness)` - **推荐**：智能重排搜索
+- `web_search(query, max_results=5, freshness="noLimit", topic="general")` - 普通搜索
 - `web_read(url)` - 读取网页并使用LLM提取结构化信息，返回 dict:
   - `title`: 网页标题
   - `publish_time`: 发布时间 (YYYY-MM-DD)
   - `content`: 主要内容摘要
   - `raw_content`: 原始网页内容
   - `url`: 原始URL
+
+### LLM重排工具
+- `llm_rerank_results(results, task_description, top_k=10, freshness_requirement)` - 对已有结果进行重排
 
 ### 会话管理
 - `init_search_session(max_search_rounds=5)` - 初始化搜索会话
@@ -247,15 +258,18 @@ result = summary
 ```
 搜索开始: 2025年2月16日 ...
 
-=== 第1轮搜索 ===
-剩余轮数: 4
-找到 10 个结果
-  - 标题1
-  - 标题2
+=== 执行智能搜索 ===
+搜索到 50 条结果
+重排摘要: LLM重排序完成
+返回最优 10 条
+
+[95分] 标题1
+  理由: 权威来源，信息最新
+  来源: eastmoney.com ★权威
 ...
 
 搜索完成！
-收集信息: 15 条
+收集信息: 10 条
 独立来源: 8 个
 ```
 
@@ -264,11 +278,10 @@ result = summary
 ## ⚠️ 重要提醒
 
 1. **必须首先调用get_current_time()** - 这是时间感知的基础
-2. **使用while循环控制搜索轮数** - 配合should_continue_searching()
-3. **每轮搜索后反思** - 使用reflect_on_coverage()评估进度
-4. **设置result变量** - 便于返回结构化结果
-5. **禁止使用import语句** - 所有工具已预置
-6. **禁止定义类** - 只使用函数式编程
+2. **推荐使用web_search_with_rerank** - 获得更高质量的搜索结果
+3. **设置result变量** - 便于返回结构化结果
+4. **禁止使用import语句** - 所有工具已预置
+5. **禁止定义类** - 只使用函数式编程
 
 ---
 

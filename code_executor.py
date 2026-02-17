@@ -29,6 +29,9 @@ from tools import (
     evaluate_search_quality,
     should_continue_searching,
     get_collected_summary,
+    # LLM Rerank tools
+    llm_rerank_results,
+    web_search_with_rerank,
 )
 
 
@@ -76,6 +79,9 @@ class SearchCodeExecutor:
             # Search tools
             'web_search': web_search,
             'web_read': web_read,
+            # LLM Rerank tools (推荐使用)
+            'web_search_with_rerank': web_search_with_rerank,
+            'llm_rerank_results': llm_rerank_results,
             # Time utility
             'get_current_time': get_current_time,
             # Search state management

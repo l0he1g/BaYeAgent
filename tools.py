@@ -822,3 +822,324 @@ def get_collected_summary() -> dict[str, Any]:
         "categories": list(by_category.keys()),
         "by_category": by_category
     }
+
+
+# ============================================================================
+# LLM Rerank Tool - 基于LLM的搜索结果重排序
+# ============================================================================
+
+# 权威网站域名列表（按领域分类）
+AUTHORITATIVE_DOMAINS = {
+    "finance": [
+        "eastmoney.com", "finance.sina.com.cn", "finance.qq.com", "caixin.com",
+        "yicai.com", "stcn.com", "cs.com.cn", "cnstock.com", "hexun.com",
+        "cailianpress.com", "secutimes.com", "fund.eastmoney.com",
+        "reuters.com", "bloomberg.com", "wsj.com", "ft.com", "cn.reuters.com",
+        "sse.com.cn", "szse.cn", "csrc.gov.cn"
+    ],
+    "news": [
+        "xinhuanet.com", "people.com.cn", "cctv.com", "china.com.cn",
+        "thepaper.cn", "ifeng.com", "sohu.com", "163.com", "qq.com",
+        "bjnews.com.cn", "caijing.com.cn", "infzm.com", "gmw.cn"
+    ],
+    "tech": [
+        "36kr.com", "leiphone.com", "csdn.net", "infoq.cn", "ithome.com",
+        "techcrunch.com", "wired.com", "arstechnica.com"
+    ],
+    "academic": [
+        "cnki.net", "wanfangdata.com.cn", "nature.com", "science.org",
+        "ieee.org", "acm.org", "arxiv.org"
+    ]
+}
+
+
+def _extract_domain(url: str) -> str:
+    """从URL中提取主域名"""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        # 移除 www. 前缀
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain
+    except:
+        return ""
+
+
+def _check_domain_authority(domain: str, topic: str = "general") -> tuple[bool, float]:
+    """检查域名是否为权威来源
+
+    Returns:
+        (is_authoritative, authority_score)
+    """
+    domain_lower = domain.lower()
+
+    # 检查所有领域的权威网站
+    for category, domains in AUTHORITATIVE_DOMAINS.items():
+        for auth_domain in domains:
+            if auth_domain in domain_lower:
+                # 根据领域相关性调整分数
+                if category == topic or topic == "general":
+                    return True, 1.0
+                else:
+                    return True, 0.8
+
+    # .gov 和 .edu 域名
+    if ".gov" in domain_lower or ".edu" in domain_lower:
+        return True, 0.9
+
+    return False, 0.5
+
+
+def llm_rerank_results(
+    results: list[dict[str, Any]],
+    task_description: str,
+    top_k: int = 10,
+    freshness_requirement: str = "oneMonth"
+) -> dict[str, Any]:
+    """使用LLM对搜索结果进行智能重排序和筛选。
+
+    综合考虑以下维度对搜索结果进行评估：
+    1. 信息价值：内容与任务的相关性和信息量
+    2. 时效性：发布时间是否满足要求
+    3. 内容质量：信息是否详实、可靠
+    4. 来源权威性：网站在该领域是否权威
+
+    Args:
+        results: 搜索结果列表，每个结果应包含 title, url, snippet/content 等字段
+        task_description: 搜索任务描述，用于评估相关性
+        top_k: 返回的最优结果数量（默认10）
+        freshness_requirement: 时效性要求 ("oneDay"/"oneWeek"/"oneMonth"/"oneYear"/"noLimit")
+
+    Returns:
+        Dict containing:
+        - ranked_results: 重排序后的top_k结果，包含评分和理由
+        - total_input: 输入的结果总数
+        - rerank_summary: 重排序决策摘要
+        - message: 状态消息
+    """
+    from langchain_openai import ChatOpenAI
+
+    if not results:
+        return {
+            "ranked_results": [],
+            "total_input": 0,
+            "rerank_summary": "无搜索结果需要重排序",
+            "message": "输入结果为空"
+        }
+
+    # 获取当前时间
+    current_time = get_current_time()
+
+    # 标准化结果格式
+    normalized_results = []
+    for i, r in enumerate(results):
+        title = r.get("title") or r.get("name", "无标题")
+        url = r.get("url") or r.get("link", "")
+        snippet = r.get("content") or r.get("snippet") or r.get("summary", "")
+        publish_time = r.get("publish_time") or r.get("published_date") or r.get("datePublished")
+
+        domain = _extract_domain(url)
+        is_auth, auth_score = _check_domain_authority(domain)
+
+        normalized_results.append({
+            "index": i,
+            "title": title[:200] if title else "无标题",  # 截断过长的标题
+            "url": url,
+            "snippet": snippet[:500] if snippet else "",  # 截断过长的摘要
+            "publish_time": publish_time,
+            "domain": domain,
+            "is_authoritative": is_auth,
+            "authority_score": auth_score
+        })
+
+    # 如果结果数量少于等于 top_k，直接返回
+    if len(normalized_results) <= top_k:
+        return {
+            "ranked_results": normalized_results,
+            "total_input": len(normalized_results),
+            "rerank_summary": f"结果数量({len(normalized_results)})不超过top_k({top_k})，无需筛选",
+            "message": "结果数量较少，全部保留"
+        }
+
+    # 使用 glm-4.7 进行重排序
+    llm = ChatOpenAI(
+        temperature=0.1,
+        model="glm-4.7",
+        openai_api_key=os.environ.get("ZHIPUAI_API_KEY"),
+        openai_api_base="https://open.bigmodel.cn/api/paas/v4/"
+    )
+
+    # 构建结果列表供LLM评估
+    results_text = ""
+    for r in normalized_results:
+        auth_marker = "★" if r["is_authoritative"] else ""
+        results_text += f"""
+[{r['index']}] {auth_marker}
+标题: {r['title']}
+来源: {r['domain']}
+时间: {r['publish_time'] or '未知'}
+摘要: {r['snippet'][:300]}
+---"""
+
+    rerank_prompt = f"""你是一个专业的信息评估专家。请对以下搜索结果进行质量评估和排序。
+
+## 当前时间
+{current_time['datetime']} ({current_time['weekday']})
+
+## 搜索任务
+{task_description}
+
+## 时效性要求
+{freshness_requirement} (oneDay=1天内, oneWeek=1周内, oneMonth=1个月内, oneYear=1年内, noLimit=不限)
+
+## 评估标准（按重要性排序）
+
+1. **信息价值 (40%)**：与搜索任务的相关性，是否包含关键信息
+2. **时效性 (30%)**：发布时间是否满足要求，越新鲜越好
+3. **内容质量 (20%)**：信息是否详实、具体、有深度
+4. **来源权威性 (10%)**：网站在该领域是否权威（标记★的为权威来源）
+
+## 搜索结果列表
+{results_text}
+
+## 任务要求
+
+请从以上结果中选出 **最优的 {top_k} 条**，并按质量从高到低排序。
+
+对于每条选中的结果，请提供：
+1. index: 原始索引号
+2. score: 综合评分 (0-100)
+3. reason: 简短的选中理由（不超过20字）
+
+请直接返回JSON格式（不要包含```json标记）：
+{{
+  "selected": [
+    {{"index": 0, "score": 95, "reason": "权威来源，信息最新"}},
+    {{"index": 3, "score": 88, "reason": "内容详实，时效性好"}},
+    ...
+  ],
+  "summary": "筛选决策的简要说明"
+}}
+
+注意：
+- 严格选择 {top_k} 条最优结果
+- 评分要有区分度，不要都是相同的分数
+- 优先选择权威来源和时效性好的结果
+- 如果结果时效性不满足要求，应在评分中体现"""
+
+    try:
+        llm_response = llm.invoke(rerank_prompt)
+        llm_content = llm_response.content.strip()
+
+        # 清理可能的 markdown 代码块
+        if llm_content.startswith("```"):
+            llm_content = llm_content.split("\n", 1)[1]
+            llm_content = llm_content.rsplit("```", 1)[0]
+
+        rerank_result = json.loads(llm_content)
+
+        # 构建排序后的结果列表
+        ranked_results = []
+        for item in rerank_result.get("selected", []):
+            idx = item.get("index")
+            if idx is not None and 0 <= idx < len(normalized_results):
+                result = normalized_results[idx].copy()
+                result["llm_score"] = item.get("score", 0)
+                result["llm_reason"] = item.get("reason", "")
+                ranked_results.append(result)
+
+        return {
+            "ranked_results": ranked_results,
+            "total_input": len(normalized_results),
+            "rerank_summary": rerank_result.get("summary", "LLM重排序完成"),
+            "message": f"已从 {len(normalized_results)} 条结果中筛选出 {len(ranked_results)} 条最优结果"
+        }
+
+    except json.JSONDecodeError as e:
+        # JSON解析失败，返回前top_k个结果（按权威性排序）
+        sorted_by_auth = sorted(
+            normalized_results,
+            key=lambda x: x.get("authority_score", 0),
+            reverse=True
+        )
+        return {
+            "ranked_results": sorted_by_auth[:top_k],
+            "total_input": len(normalized_results),
+            "rerank_summary": f"LLM响应解析失败，按权威性排序返回前{top_k}条",
+            "message": f"重排序降级处理：{str(e)}"
+        }
+    except Exception as e:
+        # 其他错误，返回前top_k个结果
+        return {
+            "ranked_results": normalized_results[:top_k],
+            "total_input": len(normalized_results),
+            "rerank_summary": f"重排序失败，返回前{top_k}条原始结果",
+            "message": f"重排序错误：{str(e)}"
+        }
+
+
+def web_search_with_rerank(
+    query: str,
+    task_description: str = "",
+    max_results: int = 50,
+    top_k: int = 10,
+    topic: Literal["general", "news", "finance"] = "general",
+    freshness: Literal["noLimit", "oneDay", "oneWeek", "oneMonth", "oneYear"] = "oneMonth"
+) -> dict[str, Any]:
+    """执行搜索并使用LLM对结果进行重排序。
+
+    这是对 web_search + llm_rerank_results 的便捷封装：
+    1. 先执行搜索，召回 max_results 条结果（默认50条）
+    2. 使用LLM对结果进行智能重排序，筛选出 top_k 条最优结果
+
+    Args:
+        query: 搜索关键词
+        task_description: 搜索任务描述（用于评估相关性，如为空则使用query）
+        max_results: 召回的结果数量（默认50，扩大召回以提高覆盖）
+        top_k: 最终返回的最优结果数量（默认10）
+        topic: 搜索主题类型
+        freshness: 时效性要求
+
+    Returns:
+        Dict containing:
+        - query: 搜索关键词
+        - results: 重排序后的top_k结果
+        - total_found: 搜索到的总结果数
+        - rerank_summary: 重排序摘要
+    """
+    # 执行搜索
+    search_results = web_search(
+        query=query,
+        max_results=max_results,
+        topic=topic,
+        freshness=freshness
+    )
+
+    # 提取结果列表
+    if 'results' in search_results:
+        # Tavily格式
+        results_list = search_results['results']
+    elif 'data' in search_results and 'webPages' in search_results['data']:
+        # BochaAI格式
+        results_list = search_results['data']['webPages']['value']
+    else:
+        results_list = []
+
+    # 使用LLM重排序
+    rerank_response = llm_rerank_results(
+        results=results_list,
+        task_description=task_description or query,
+        top_k=top_k,
+        freshness_requirement=freshness
+    )
+
+    return {
+        "query": query,
+        "results": rerank_response["ranked_results"],
+        "total_found": len(results_list),
+        "total_returned": len(rerank_response["ranked_results"]),
+        "rerank_summary": rerank_response["rerank_summary"],
+        "freshness": freshness
+    }
